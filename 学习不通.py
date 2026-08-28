@@ -7,55 +7,6 @@ import threading
 import time
 
 
-
-def enable_console_log(filename="控制台日志.txt"):
-    import atexit
-    import sys
-    from pathlib import Path
-    from threading import Lock
-
-    class Tee:
-        def __init__(self, console, log_file):
-            self.console = console
-            self.log_file = log_file
-            self.lock = Lock()
-
-        def write(self, text):
-            with self.lock:
-                self.console.write(text)
-                self.log_file.write(text)
-                self.log_file.flush()
-            return len(text)
-
-        def flush(self):
-            self.console.flush()
-            self.log_file.flush()
-
-        def __getattr__(self, name):
-            return getattr(self.console, name)
-
-    log_path = Path(__file__).resolve().with_name(filename)
-    log_file = log_path.open("a", encoding="utf-8", buffering=1)
-
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-
-    sys.stdout = Tee(old_stdout, log_file)
-    sys.stderr = Tee(old_stderr, log_file)
-
-    def close_log():
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-        log_file.close()
-
-    atexit.register(close_log)
-
-
-
-
-
-
-
 class BrowserManager:
     def __init__(self, url=None):
         self.loop = None
@@ -143,8 +94,6 @@ class BrowserManager:
                     Object.defineProperty(window.screen, 'height', {value: 1080});
                 """)
 
-        # # 事件监听：每次主框架导航完成后自动检测
-        # self.page.on("framenavigated", self.on_frame_navigated)
         # 访问超星课程页面
         await self.page.goto(target_url, timeout=60000, wait_until="networkidle")
 
@@ -201,7 +150,6 @@ class BrowserManager:
 
         except Exception as e:
             print(f"滑动寻找按钮失败：{e}")
-            # await page.reload(timeout=15000)
             return None, None
 
 
@@ -416,5 +364,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    enable_console_log()
     asyncio.run(main())
