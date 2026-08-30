@@ -6,7 +6,6 @@ import random
 import threading
 import time
 
-
 class BrowserManager:
     def __init__(self, url=None):
         self.loop = None
@@ -64,9 +63,10 @@ class BrowserManager:
                 '--disable-extensions',
                 '--disable-infobars',
                 '--start-maximized',
-                '--disable-media-autoplay-restrictions'
+                '--disable-media-autoplay-restrictions',
+                '--mute-audio'             # 开启禁音
             ],
-            'ignore_default_args': [                      # 默认禁音
+            'ignore_default_args': [
                 '--enable-automation'
             ],
             'viewport': {'width': 1920, 'height': 768 },
@@ -116,23 +116,54 @@ class BrowserManager:
             await page.wait_for_url("**/mycourse/studentstudy**", timeout=15000)
         except Exception:
             print("当前页面不是学习页面，跳过任务检测")
-            return None, None
+            return None, None, None, None
 
         # 等待iframe出现
         try:
             main_iframe = page.frame_locator("iframe#iframe")  # 最外层套了一个<iframe> id="iframe"
-            div_locator = main_iframe.locator("div[aria-label='任务点未完成']")
+            div_locator = main_iframe.locator("div[aria-label='任务点未完成']")          # 此为视频黄标任务点
+            ppt_fathor_locator = main_iframe.locator("div.ans-attach-ct")                 # <div> class="ans-attach-ct.ans-job-finished"为已完成
+            ppt_locator = ppt_fathor_locator.locator("div.ans-job-icon:not([aria-label])")    # <div> class="ans-job-icon"为PPT黄标任务点，且下面还有两层iframe
+
+            ppt_count = await ppt_locator.count()
             div_count = await div_locator.count()
-            print(f"本页检测到{div_count}个任务")
+            print(f"本页检测到{ppt_count}个PPT任务 + {div_count}个视频任务")
             span_locator = page.locator("span.orangeNew")
 
             # div_locator = page.locator("div.ans-cc#pageDiv")   # <div> class="ans-cc" id="pageDiv"
-            return div_locator, div_count
+            return div_locator, div_count, ppt_locator, ppt_count
 
         except Exception as e:
             print(f"定位主iframe失败：{e}")
             await page.reload(timeout=15000)
-            return None, None
+            return None, None, None, None
+
+    async def ppt_task(self, j, page, ppt_locator):
+        """滑动并点击播放PPT"""
+        parent_locator = ppt_locator.nth(j).locator("xpath=..")         # 会检索出四个iframe，第一个是第一级，第二个是他的子级；三四两个都在第一级下，和第二个不在同一层
+        first_iframe = parent_locator.frame_locator("iframe.ans-attach-online")  # 该类的次一级有.insertdoc-online-ppt为PPT；有.insertdoc-online-pdf为PDF
+        ppt_look_locator = first_iframe.locator("div.imglook#img")
+        second_iframe = first_iframe.frame_locator("iframe#panView")   # 直接打开第二个iframe，现在为包含了PPT的iframe
+        # <div> clase="fileBox"为PPT内容
+        ppt_page = second_iframe.locator("div.fileBox")
+
+        await ppt_page.wait_for(state="attached", timeout=10000)
+        await ppt_page.scroll_into_view_if_needed(timeout=5000)               # 下一步：滚动PPT直到最后
+
+        # 鼠标挪入pdf阅读框中
+        ppt_box = await ppt_look_locator.bounding_box()
+        click_x = ppt_box["x"] + ppt_box["width"] / 2 + random.randint(-3, 3)
+        click_y = ppt_box["y"] + ppt_box["height"] / 2 + random.randint(-3, 3)
+        await page.mouse.move(click_x, click_y)
+
+        all_ppt_page = ppt_page.locator("li")
+        ppt_page_count = await all_ppt_page.count()
+        for i in range(ppt_page_count):
+            one_ppt_box = await all_ppt_page.nth(i).bounding_box()
+            one_ppt_height = one_ppt_box["height"] + one_ppt_box["height"] / 2
+            await page.mouse.wheel(0, one_ppt_height)
+
+
 
     async def video_task(self, i, page, div_locator):
         """滑动并点击播放视频"""
@@ -157,7 +188,7 @@ class BrowserManager:
         """主任务列表"""
         if page is None:
             page = self.page
-        div_locator, div_count = await self.scan_page(page)
+        div_locator, div_count, ppt_locator, ppt_count = await self.scan_page(page)
 
 
         if (div_locator, div_count) == (None, None):
@@ -165,6 +196,13 @@ class BrowserManager:
 
         if self.counter_task == None:
             self.counter_task = asyncio.create_task(self.min_counter(page))
+
+        for j in range(ppt_count):
+            try:
+                await self.ppt_task(0, page, ppt_locator)          # =======================================================在这里
+            except Exception as e:
+                print(f"第{j+1}个PPT阅读失败，{e}")
+                continue
 
         for i in range(div_count):
             try:
@@ -215,36 +253,18 @@ class BrowserManager:
 
         return video_status
 
-    async def change_video_page(self, page):        # <span> class="orangeNew"内数量不为 0 即有任务
-        """"该页视频播放完后换页"""
-        # span_locator_count = await span_locator.count()          # <div> class="posCatalog_select posCatalog_active" 即正在此页播放课程
-        now_div_locator = page.locator("div.posCatalog_select.posCatalog_active")          # 现在所在的节
-        now_second_li_locator = now_div_locator.locator("xpath=..")                        # 该节的li
-        next_Li = now_second_li_locator.locator("xpath=following-sibling::li[.//span[contains(@class, 'orangeNew')]][1]")
-        em_locator = next_Li.locator("em.posCatalog_sbar")               # 存在第三级的可能性
 
-        if await next_Li.count() > 0:                                    # 该章内，本li后还有下一个li；或有第三级目录
-            unfinished_span = next_Li.locator("span.orangeNew").first
-            task_li = unfinished_span.locator("xpath=ancestor::li[1]")
-            target_em = task_li.locator(":scope > div em.posCatalog_sbar").first
-            await target_em.scroll_into_view_if_needed(timeout=5000)     # 滚动直至可视
-            await self.simulate_human_click(target_em, page)
+    async def change_video_page(self, page):  # 更改逻辑：直接点击下一节，下一页是否有任务交给下一页的检测
+        """通过直接点击下一页按钮来换页"""
+        next_page_button = page.locator("div#prevNextFocusNext")
+        await next_page_button.wait_for(state="attached", timeout=10000)
+        await next_page_button.scroll_into_view_if_needed(timeout=5000)
+        await self.simulate_human_click(next_page_button, page)
+        next_page_tips = page.locator("a.jb_btn.jb_btn_92.fr.fs14.nextChapter")       # "a.jb_btn.jb_btn_92.fr.fs14.nextChapter" 为弹窗，等点击下一章才会跳出
 
-        else:                                                            # 需要换到下一章
-            chapter_li_locator = now_second_li_locator.locator("xpath=../../..")  # 整个课程的li列表，每一个li都是一章
-            next_chapter_locator = chapter_li_locator.locator("xpath=following-sibling::li[1]")
-            next_chapter_first_span = next_chapter_locator.locator("span.orangeNew").first
-            while await next_chapter_first_span.count() == 0:            # 防止下一章没有未完成任务点，一直向下找
-                next_2_chapter_locator = next_chapter_locator.locator("xpath=following-sibling::li[1]")
-                next_chapter_first_span = next_2_chapter_locator.locator("span.orangeNew").first
-                next_chapter_locator = next_2_chapter_locator
-                if await next_chapter_locator.count() == 0:
-                    print("没有下一章了")
-                    return
-            next_chapter_first_div = next_chapter_first_span.locator("xpath=../..")
-            next_em_locator = next_chapter_first_div.locator("em.posCatalog_sbar")
-            await next_em_locator.scroll_into_view_if_needed(timeout=5000)         # 滚动直至可视
-            await self.simulate_human_click(next_em_locator, page)
+        if await next_page_tips.is_visible():
+            await self.simulate_human_click(next_page_tips, page)
+
 
 
     async def simulate_human_click(self, button_locator, page=None):
@@ -292,7 +312,6 @@ class BrowserManager:
         try:
             await new_page.wait_for_load_state("networkidle", timeout=30000)
         except Exception as e:
-            # await new_page.reload(timeout=15000)
             print(f"新页面加载超时：{e}")
 
         # 为新页面添加导航监听（支持后续跳转）
@@ -349,6 +368,7 @@ async def main():
     course_url = "https://v8.chaoxing.com/"  # 超星课程具体URL
 
     try:
+        print("当前为学习不通第一次测试，如遇问题请联系2730137205@qq.com")
         print("正在启动浏览器，适配超星学习通...")
         browser = BrowserManager(url=course_url)
         await browser.open_chromium(course_url)
