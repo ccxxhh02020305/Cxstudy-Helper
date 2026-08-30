@@ -1,5 +1,5 @@
 # Cxstudy-Helper
-“学习不通”A script that helps college students easily and quickly complete assignments for online courses
+“学习不通”  A script that helps college students easily and quickly complete assignments for online courses
 
 目前已实现自动刷PPT以及课程视频。当然没有自动做题功能——我相信不是AI做出来的你们也不信，对吗？（不过我在考虑要不要加入可以接入主流AIapi的功能，不过这肯定是后话了）
 
