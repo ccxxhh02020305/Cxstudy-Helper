@@ -6,6 +6,7 @@ import random
 import threading
 import time
 
+
 class BrowserManager:
     def __init__(self, url=None):
         self.loop = None
@@ -20,6 +21,7 @@ class BrowserManager:
         self.counter_task = None
         self.is_running = True
         self.is_checking = False
+        self.now_li_id = None
         self.user_data_dir = "C:\\Temp\\PlaywrightUserDir"
         os.makedirs(self.user_data_dir, exist_ok=True)
 
@@ -116,7 +118,7 @@ class BrowserManager:
             await page.wait_for_url("**/mycourse/studentstudy**", timeout=15000)
         except Exception:
             print("当前页面不是学习页面，跳过任务检测")
-            return None, None, None, None
+            return None, None, None, None, None
 
         # 等待iframe出现
         try:
@@ -130,13 +132,18 @@ class BrowserManager:
             print(f"本页检测到{ppt_count}个PPT任务 + {div_count}个视频任务")
             span_locator = page.locator("span.orangeNew")
 
+            # 新添加
+            more_task_one_page_ul_locator = page.locator("ul.prev_ul.clearfix")   # 切换顶部上下页签不会触发页面监测
+            li_locators = more_task_one_page_ul_locator.locator("li")
+            li_count = await li_locators.count()
+
             # div_locator = page.locator("div.ans-cc#pageDiv")   # <div> class="ans-cc" id="pageDiv"
-            return div_locator, div_count, ppt_locator, ppt_count
+            return div_locator, div_count, ppt_locator, ppt_count, more_task_one_page_ul_locator
 
         except Exception as e:
             print(f"定位主iframe失败：{e}")
             await page.reload(timeout=15000)
-            return None, None, None, None
+            return None, None, None, None, None
 
     async def ppt_task(self, j, page, ppt_locator):
         """滑动并点击播放PPT"""
@@ -183,23 +190,47 @@ class BrowserManager:
             print(f"滑动寻找按钮失败：{e}")
             return None, None
 
+    async def switch(self, page):
+        """解决：小页签切换时不会刷新页面，进而导致不会触发检测的锁死问题"""
+        active_li = page.locator("ul.prev_ul.clearfix").locator("li.active")
+
+        while self.is_running and not page.is_closed():
+            try:
+                if "/mycourse/studentstudy" not in page.url:      # 防止因持续查找登录页的li而导致的持续报错
+                    await asyncio.sleep(1)
+                    continue
+
+                await active_li.wait_for(state="attached", timeout=15000)
+                if self.now_li_id != await active_li.get_attribute("id"):
+                    await asyncio.sleep(1)  # 等待动态内容渲染
+                    await self.auto_check_tasks(page)
+
+                await asyncio.sleep(0.5)
+
+            except Exception as e:
+                print(f"查找页签时发生错误{e}")
+
 
     async def task_list(self, page=None):
         """主任务列表"""
         if page is None:
             page = self.page
-        div_locator, div_count, ppt_locator, ppt_count = await self.scan_page(page)
-
+        div_locator, div_count, ppt_locator, ppt_count, ul_locator = await self.scan_page(page)
 
         if (div_locator, div_count) == (None, None):
             return
+
+
+        # 永远只将本任务轮次的 id 列为 now_li_id
+        now_li = ul_locator.locator("li.active")  # <li> class="active" 为当前所在页
+        self.now_li_id = await now_li.get_attribute("id")
 
         if self.counter_task == None:
             self.counter_task = asyncio.create_task(self.min_counter(page))
 
         for j in range(ppt_count):
             try:
-                await self.ppt_task(0, page, ppt_locator)          # =======================================================在这里
+                await self.ppt_task(0, page, ppt_locator)
             except Exception as e:
                 print(f"第{j+1}个PPT阅读失败，{e}")
                 continue
@@ -254,7 +285,7 @@ class BrowserManager:
         return video_status
 
 
-    async def change_video_page(self, page):  # 更改逻辑：直接点击下一节，下一页是否有任务交给下一页的检测
+    async def change_video_page(self, page):  # 更改逻辑，直接点击下一节，下一页是否有任务交给下一页的检测
         """通过直接点击下一页按钮来换页"""
         next_page_button = page.locator("div#prevNextFocusNext")
         await next_page_button.wait_for(state="attached", timeout=10000)
@@ -316,10 +347,11 @@ class BrowserManager:
 
         # 为新页面添加导航监听（支持后续跳转）
         new_page.on("framenavigated", lambda frame: asyncio.create_task(self.on_frame_navigated(frame, page=new_page)))
+        asyncio.create_task(self.switch(new_page))
 
         # 执行首次任务检测
         await asyncio.sleep(1)  # 等待动态内容渲染
-        await self.auto_check_tasks(page=new_page)  # 需要对原有方法支持指定 page
+        await self.auto_check_tasks(page=new_page)
 
     async def on_frame_navigated(self, frame, page=None):
         if page is None:
