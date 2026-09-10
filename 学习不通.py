@@ -5,6 +5,7 @@ import os
 import random
 import threading
 import time
+from urllib.parse import urlparse, parse_qs
 
 
 class BrowserManager:
@@ -13,6 +14,7 @@ class BrowserManager:
         self.stop_event = None
         self.closed = False
         self.url = url
+        self.last_scan_chapter_id = None
         self.playwright = None
         self.context = None
         self.page = None
@@ -71,7 +73,7 @@ class BrowserManager:
             'ignore_default_args': [
                 '--enable-automation'
             ],
-            'viewport': {'width': 1920, 'height': 768 },
+            'viewport': {'width': 1400, 'height': 850 },
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
             'permissions': ["notifications"],
             'locale': "zh-CN",
@@ -123,9 +125,14 @@ class BrowserManager:
         # 等待iframe出现
         try:
             main_iframe = page.frame_locator("iframe#iframe")  # 最外层套了一个<iframe> id="iframe"
-            div_locator = main_iframe.locator("div[aria-label='任务点未完成']")          # 此为视频黄标任务点
+
+            # 部分已完成任务点 aria-label 仍为任务点未完成；须在父级排除
+            div_locator = (main_iframe.locator("div.ans-attach-ct.videoContainer:not(.ans-job-finished)")
+                           .locator("div[aria-label='任务点未完成']"))          # 此为视频黄标任务点
+
             ppt_fathor_locator = main_iframe.locator("div.ans-attach-ct")                 # <div> class="ans-attach-ct.ans-job-finished"为已完成
             ppt_locator = ppt_fathor_locator.locator("div.ans-job-icon:not([aria-label])")    # <div> class="ans-job-icon"为PPT黄标任务点，且下面还有两层iframe
+
 
             ppt_count = await ppt_locator.count()
             div_count = await div_locator.count()
@@ -175,12 +182,13 @@ class BrowserManager:
     async def video_task(self, i, page, div_locator):
         """滑动并点击播放视频"""
         parent_locator = div_locator.nth(i).locator("xpath=..")  # 返回父级，包含未完成标记和视频iframe
+
         try:
             await parent_locator.scroll_into_view_if_needed(timeout=5000)
             await page.wait_for_timeout(1000)
             video_iframe = parent_locator.frame_locator("iframe")
             video_button = video_iframe.locator("button.vjs-big-play-button")  # 定位器
-            await video_button.wait_for(state="attached", timeout=5000)
+            await video_button.wait_for(state="visible", timeout=5000)
             await video_button.scroll_into_view_if_needed(timeout=5000)        # 滚动直至可视
             await self.simulate_human_click(video_button, page)
             self.video_status = await self.change_video_status(page, video_iframe)        # 改变视频状态
@@ -220,7 +228,7 @@ class BrowserManager:
         if (div_locator, div_count) == (None, None):
             return
 
-
+        # 以下改动
         # 永远只将本任务轮次的 id 列为 now_li_id
         now_li = ul_locator.locator("li.active")  # <li> class="active" 为当前所在页
         self.now_li_id = await now_li.get_attribute("id")
@@ -283,7 +291,6 @@ class BrowserManager:
             video_status = False
 
         return video_status
-
 
     async def change_video_page(self, page):  # 更改逻辑，直接点击下一节，下一页是否有任务交给下一页的检测
         """通过直接点击下一页按钮来换页"""
@@ -351,7 +358,7 @@ class BrowserManager:
 
         # 执行首次任务检测
         await asyncio.sleep(1)  # 等待动态内容渲染
-        await self.auto_check_tasks(page=new_page)
+        await self.auto_check_tasks(page=new_page)  # 需要对原有方法支持指定 page
 
     async def on_frame_navigated(self, frame, page=None):
         if page is None:
@@ -359,18 +366,38 @@ class BrowserManager:
         if frame != page.main_frame:
             return
         print(f"检测到页面跳转至：{frame.url}")
+
         await asyncio.sleep(2)
         asyncio.create_task(self.auto_check_tasks(page=page))
 
     async def auto_check_tasks(self, page=None):
         if page is None:
             page = self.page
-        if self.is_checking:
+
+        query = parse_qs(urlparse(page.url).query)    # 提取 chapterId 作为任务编号
+        page_chapter_id = query.get("chapterId", [None])[0]
+
+        if page_chapter_id is None:
+            print("当前 URL 中没有 chapterId，跳过扫描")
             return
+
+        # 同一章节的重复导航事件只处理一次
+        if page_chapter_id == self.last_scan_chapter_id and self.is_checking:
+            print(f"重复扫描请求，跳过 chapterId={page_chapter_id}")
+            return
+
+        # 此处先登记，避免两个相近的回调同时进入扫描
+        self.last_scan_chapter_id = page_chapter_id
+
+        # if self.is_checking:
+        #     return
         self.is_checking = True
         try:
             await self.task_list(page=page)
         except Exception as e:
+            # 扫描失败后允许该章节再次触发
+            if self.last_scan_chapter_id == page_chapter_id:
+                self.last_scan_chapter_id = None
             print(f"自动检测任务出错：{e}")
         finally:
             self.is_checking = False
@@ -396,12 +423,14 @@ class BrowserManager:
         await self.stop_event.wait()
 
 
+
 async def main():
     course_url = "https://v8.chaoxing.com/"  # 超星课程具体URL
 
     try:
         print("当前为学习不通第一次测试，如遇问题请联系2730137205@qq.com")
         print("正在启动浏览器，适配超星学习通...")
+        print("如需退出，请点击ESC键")
         browser = BrowserManager(url=course_url)
         await browser.open_chromium(course_url)
         print("\n浏览器已打开！")
