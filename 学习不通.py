@@ -8,7 +8,13 @@ import time
 from urllib.parse import urlparse, parse_qs
 
 
+
+
 class BrowserManager:
+    VIDEO_PLAYING = "stop"
+    VIDEO_STOP = "play"
+    VIDEO_END = "replay"
+
     def __init__(self, url=None):
         self.loop = None
         self.stop_event = None
@@ -18,12 +24,13 @@ class BrowserManager:
         self.playwright = None
         self.context = None
         self.page = None
-        self.video_status = False
+        self.video_status = self.VIDEO_END
         self.start_time = None
         self.counter_task = None
         self.is_running = True
         self.is_checking = False
         self.now_li_id = None
+        self.mouse_task = None
         self.user_data_dir = "C:\\Temp\\PlaywrightUserDir"
         os.makedirs(self.user_data_dir, exist_ok=True)
 
@@ -187,16 +194,40 @@ class BrowserManager:
             await parent_locator.scroll_into_view_if_needed(timeout=5000)
             await page.wait_for_timeout(1000)
             video_iframe = parent_locator.frame_locator("iframe")
-            video_button = video_iframe.locator("button.vjs-big-play-button")  # 定位器
+            video_button = video_iframe.locator("button.vjs-big-play-button")       # 定位器，视频开始播放前的大按钮
+            small_video_button = video_iframe.locator("button.vjs-play-control")    # 定位器，视频播放中突然暂停重新播放用
             await video_button.wait_for(state="visible", timeout=5000)
             await video_button.scroll_into_view_if_needed(timeout=5000)        # 滚动直至可视
             await self.simulate_human_click(video_button, page)
+            if self.mouse_task and not self.mouse_task.done():
+                self.mouse_task.cancel()
+                try:
+                    await self.mouse_task
+                except asyncio.CancelledError:
+                    pass
+            self.mouse_task = asyncio.create_task(self.keep_mouse(page, video_iframe))
             self.video_status = await self.change_video_status(page, video_iframe)        # 改变视频状态
-            return self.video_status, video_iframe
+            return self.video_status, video_iframe, small_video_button
 
         except Exception as e:
             print(f"滑动寻找按钮失败：{e}")
-            return None, None
+            return None, None, None
+
+    async def keep_mouse(self, page, video_iframe):
+        """解决：保持鼠标一直在视频框内"""
+        player = video_iframe.locator("div.video-js")
+        try:
+            while self.is_running and not page.is_closed():
+                video_box = await player.bounding_box()
+
+                await player.hover(position={"x":video_box['width'] / 2, "y":video_box['height'] / 2})
+                await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"保持鼠标位置失败：{e}")
+
 
     async def switch(self, page):
         """解决：小页签切换时不会刷新页面，进而导致不会触发检测的锁死问题"""
@@ -245,10 +276,12 @@ class BrowserManager:
 
         for i in range(div_count):
             try:
-                self.video_status, video_iframe = await self.video_task(0, page, div_locator)  # 为防止动态的div_locator索引越界，硬编码 i 为 0
-                while(self.video_status):
+                self.video_status, video_iframe, small_video_button = await self.video_task(0, page, div_locator)  # 为防止动态的div_locator索引越界，硬编码 i 为 0
+                while(self.video_status != self.VIDEO_END):
                     await asyncio.sleep(10)
                     self.video_status = await self.change_video_status(page, video_iframe)
+                    if self.video_status == self.VIDEO_STOP:
+                        await self.simulate_human_click(small_video_button, page)
             except Exception as e:
                 print(f"第{i+1}个视频播放失败，{e}")
                 continue
@@ -258,7 +291,7 @@ class BrowserManager:
     async def F5(self, page):
         now = time.monotonic()
 
-        if self.video_status:         # 视频正在播放，清除未播放计时
+        if self.video_status == self.VIDEO_PLAYING:         # 视频正在播放，清除未播放计时
             self.start_time = None
             return
         if self.start_time is None:   # 第一次检测到视频停止
@@ -286,9 +319,11 @@ class BrowserManager:
         video_status_locator = div_locator.locator("span.vjs-control-text")
         video_status = await video_status_locator.text_content()
         if video_status == "暂停":
-            video_status = True
+            video_status = self.VIDEO_PLAYING
+        elif video_status == "播放":
+            video_status = self.VIDEO_STOP
         else:
-            video_status = False
+            video_status = self.VIDEO_END
 
         return video_status
 
