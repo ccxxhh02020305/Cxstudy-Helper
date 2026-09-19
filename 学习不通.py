@@ -207,6 +207,13 @@ class BrowserManager:
                     pass
             self.mouse_task = asyncio.create_task(self.keep_mouse(page, video_iframe))
             self.video_status = await self.change_video_status(page, video_iframe)        # 改变视频状态
+
+            # 设置播放速率为 2 倍
+            await video_iframe.locator("video").evaluate("""el => {
+                el.defaultPlaybackRate = 2.0;
+                el.playbackRate = 2.0;
+            }""")
+            
             return self.video_status, video_iframe, small_video_button
 
         except Exception as e:
