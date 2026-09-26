@@ -6,8 +6,8 @@ import random
 import threading
 import time
 from urllib.parse import urlparse, parse_qs
-
-
+from rapidocr import RapidOCR
+from QA import Question_answer
 
 
 class BrowserManager:
@@ -15,7 +15,7 @@ class BrowserManager:
     VIDEO_STOP = "play"
     VIDEO_END = "replay"
 
-    def __init__(self, url=None):
+    def __init__(self, url=None, question_enabled=True):
         self.loop = None
         self.stop_event = None
         self.closed = False
@@ -31,8 +31,16 @@ class BrowserManager:
         self.is_checking = False
         self.now_li_id = None
         self.mouse_task = None
+        self.question_enabled = question_enabled
+        self.ocr = None
+        self.question = None
+        self.is_question = False
         self.user_data_dir = "C:\\Temp\\PlaywrightUserDir"
         os.makedirs(self.user_data_dir, exist_ok=True)
+
+    def set_question_enabled(self, enabled):
+        """给UI调用，来控制功能切换"""
+        self.question_enabled = enabled
 
     async def open_chromium(self, url=None):
         self.loop = asyncio.get_running_loop()
@@ -105,6 +113,8 @@ class BrowserManager:
                     Object.defineProperty(window.screen, 'height', {value: 1080});
                 """)
 
+        # # 事件监听：每次主框架导航完成后自动检测
+        # self.page.on("framenavigated", self.on_frame_navigated)
         # 访问超星课程页面
         await self.page.goto(target_url, timeout=60000, wait_until="networkidle")
 
@@ -127,7 +137,7 @@ class BrowserManager:
             await page.wait_for_url("**/mycourse/studentstudy**", timeout=15000)
         except Exception:
             print("当前页面不是学习页面，跳过任务检测")
-            return None, None, None, None, None
+            return None, None, None, None, None, None, None
 
         # 等待iframe出现
         try:
@@ -140,10 +150,14 @@ class BrowserManager:
             ppt_fathor_locator = main_iframe.locator("div.ans-attach-ct")                 # <div> class="ans-attach-ct.ans-job-finished"为已完成
             ppt_locator = ppt_fathor_locator.locator("div.ans-job-icon:not([aria-label])")    # <div> class="ans-job-icon"为PPT黄标任务点，且下面还有两层iframe
 
+            question_fathor_locator = main_iframe.locator("div.ans-attach-ct") # <div> class="ans-job-icon" [aria-label='任务点未完成']为作业黄标任务点
+            question_locator = question_fathor_locator.locator("div.ans-job-icon[aria-label='任务点未完成']")  # 下面也是两层iframe
+
 
             ppt_count = await ppt_locator.count()
             div_count = await div_locator.count()
-            print(f"本页检测到{ppt_count}个PPT任务 + {div_count}个视频任务")
+            question_count = await question_locator.count()
+            print(f"本页检测到{ppt_count}个PPT任务 + {div_count}个视频任务 + {question_count}个作业任务")
             span_locator = page.locator("span.orangeNew")
 
             # 新添加
@@ -152,12 +166,12 @@ class BrowserManager:
             li_count = await li_locators.count()
 
             # div_locator = page.locator("div.ans-cc#pageDiv")   # <div> class="ans-cc" id="pageDiv"
-            return div_locator, div_count, ppt_locator, ppt_count, more_task_one_page_ul_locator
+            return div_locator, div_count, ppt_locator, ppt_count, more_task_one_page_ul_locator, question_locator, question_count
 
         except Exception as e:
             print(f"定位主iframe失败：{e}")
             await page.reload(timeout=15000)
-            return None, None, None, None, None
+            return None, None, None, None, None, None, None
 
     async def ppt_task(self, j, page, ppt_locator):
         """滑动并点击播放PPT"""
@@ -213,12 +227,86 @@ class BrowserManager:
                 el.defaultPlaybackRate = 2.0;
                 el.playbackRate = 2.0;
             }""")
-            
+
             return self.video_status, video_iframe, small_video_button
 
         except Exception as e:
             print(f"滑动寻找按钮失败：{e}")
             return None, None, None
+
+    async def question_task(self, page, k, question_locator):
+        """将题目截图，OCR识别，识别的文字交由 QA.py，返回的结果调用模拟点击来选择，保存结果，提交由用户进行"""
+        if not self.question_enabled:
+            return
+
+        self.is_question = True             # 先设置状态，重置刷新时间
+        if self.ocr is None:
+            self.ocr = RapidOCR()
+        if self.question is None:
+            self.question = Question_answer()
+
+        question_path = os.path.join(self.user_data_dir, "question.png")
+        first_iframe = question_locator.locator("xpath=..").frame_locator("iframe")
+        second_iframe = first_iframe.frame_locator("iframe#frame_content")     # 第二级iframe
+        question_and_button = second_iframe.locator("div.CeYan")               # 按钮以及题目共同的父级
+
+        # 题目
+        frame = question_and_button.locator(f"form#form{k+1}")                   # 还有一个frame
+        all_question_locator = frame.locator("div.ZyBottom.ans-cc")    # 整个题目的框架
+        await all_question_locator.wait_for(state="visible", timeout=5000)
+        questions_locators = all_question_locator.locator("div.singleQuesId")
+
+        # 按钮
+        father_button_locator = question_and_button.locator("div.ZY_sub.clearfix")
+        button_locator = father_button_locator.locator("span[title='暂时保存']")   # 暂时保存按钮
+
+        questions_counts = await questions_locators.count()
+
+        try:
+            await self.question.open()              # 启动QA搜索浏览器
+            for i in range(questions_counts):
+                if not self.question_enabled:       # 解题过程中关闭
+                    print("解题功能已关闭，停止当前解题任务")
+                    return
+
+                try:
+                    this_question_locator = questions_locators.nth(i)
+                    await this_question_locator.screenshot(path=question_path)
+
+                    result = await asyncio.to_thread(self.ocr, question_path)   # OCR识别题目
+                    answer = await self.question.baidu_url(result.txts)         # 调用QA解题
+
+                    # !!!!!  以下点击逻辑未写 +++++++++++++++++++++++++++++++++++++++
+                    # 注意一下页签变化会不会导致异常（不会）
+                    options_locator = this_question_locator.locator("label.fl.before")
+
+                    if "A" in answer:
+                        await self.simulate_human_click(options_locator.nth(0), page)
+                    if "B" in answer:
+                        await self.simulate_human_click(options_locator.nth(1), page)
+                    if "C" in answer:
+                        await self.simulate_human_click(options_locator.nth(2), page)
+                    if "D" in answer:
+                        await self.simulate_human_click(options_locator.nth(3), page)
+
+                except Exception as e:
+                    print(f"第{i+1}题解题失败，跳过{e}")
+                    continue
+        finally:
+            try:
+                await self.question.close()          # 本页解题完毕，关闭QA浏览器
+            except Exception as e:
+                print(f"关闭解题窗口失败：{e}")
+            self.question = None
+            self.is_question = False
+
+        await button_locator.wait_for(state="visible", timeout=10000)
+        await button_locator.scroll_into_view_if_needed()
+        await self.simulate_human_click(button_locator, page)     # 保存
+        await page.wait_for_timeout(3000)                         # 等待保存按钮点击完毕
+
+
+
 
     async def keep_mouse(self, page, video_iframe):
         """解决：保持鼠标一直在视频框内"""
@@ -236,7 +324,7 @@ class BrowserManager:
             print(f"保持鼠标位置失败：{e}")
 
 
-    async def switch(self, page):
+    async def switch(self, page):              # 会触发页面检测
         """解决：小页签切换时不会刷新页面，进而导致不会触发检测的锁死问题"""
         active_li = page.locator("ul.prev_ul.clearfix").locator("li.active")
 
@@ -261,7 +349,7 @@ class BrowserManager:
         """主任务列表"""
         if page is None:
             page = self.page
-        div_locator, div_count, ppt_locator, ppt_count, ul_locator = await self.scan_page(page)
+        div_locator, div_count, ppt_locator, ppt_count, ul_locator, question_locator, question_count = await self.scan_page(page)
 
         if (div_locator, div_count) == (None, None):
             return
@@ -274,6 +362,7 @@ class BrowserManager:
         if self.counter_task == None:
             self.counter_task = asyncio.create_task(self.min_counter(page))
 
+        # PPT
         for j in range(ppt_count):
             try:
                 await self.ppt_task(0, page, ppt_locator)
@@ -281,6 +370,7 @@ class BrowserManager:
                 print(f"第{j+1}个PPT阅读失败，{e}")
                 continue
 
+        # 视频
         for i in range(div_count):
             try:
                 self.video_status, video_iframe, small_video_button = await self.video_task(0, page, div_locator)  # 为防止动态的div_locator索引越界，硬编码 i 为 0
@@ -293,9 +383,25 @@ class BrowserManager:
                 print(f"第{i+1}个视频播放失败，{e}")
                 continue
 
+        # 解题
+        if self.question_enabled:
+            for k in range(question_count):
+                try:
+                    await self.question_task(page, k, question_locator)
+                except Exception as e:
+                    print(f"第{k+1}个测验任务失败：{e}")
+                    continue
+        elif question_count:
+            print(f"检测到{question_count}个作业任务，解题功能已关闭，已跳过")
+
+
         await self.change_video_page(page)
 
     async def F5(self, page):
+        if self.is_question:         # 防止在做题时计时刷新
+            self.start_time = None
+            return
+
         now = time.monotonic()
 
         if self.video_status == self.VIDEO_PLAYING:         # 视频正在播放，清除未播放计时
