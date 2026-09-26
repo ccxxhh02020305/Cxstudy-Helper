@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QLabel,
+    QMessageBox,
 )
 from qasync import QEventLoop, asyncSlot
 from 学习不通 import BrowserManager
@@ -32,6 +33,7 @@ class MainWindow(QWidget):
 
         self.browser_manager = None          # 当前BrowserManager实例
         self.browser_task = None             # 正在运行的异步浏览器任务
+        self.question_enabled = False        # 解题功能默认关闭
 
         self.original_stdout = sys.stdout
         self.original_stderr = sys.stderr
@@ -45,18 +47,31 @@ class MainWindow(QWidget):
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
 
+        self.question_button = QPushButton("解题功能：关闭")
+        self.question_button.setCheckable(True)
+        self.question_button.setChecked(False)
+
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumBlockCount(3000)     # 最多保留3000个文本块
+
+        self.text = QLabel("Designed by cxh，如遇问题请联系2730137205@qq.com")
 
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
 
+        function_layout = QHBoxLayout()
+        function_layout.addWidget(QLabel("功能设置："))
+        function_layout.addWidget(self.question_button)
+        function_layout.addStretch()
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.status_label)
         layout.addLayout(button_layout)
+        layout.addLayout(function_layout)
         layout.addWidget(self.console)
+        layout.addWidget(self.text)
 
         # 只接管 stdout
         self.ui_output = UiOutput()
@@ -68,6 +83,30 @@ class MainWindow(QWidget):
 
         self.start_button.clicked.connect(self.start_browser)
         self.stop_button.clicked.connect(self.stop_browser)
+        self.question_button.clicked.connect(self.toggle_question)
+
+    def toggle_question(self, checked):
+        if checked:
+            answer = QMessageBox.question(
+                self,
+                "开启解题功能",
+                "解题时会有新窗口打开以及额外资源占用，是否开启？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.question_button.setChecked(False)
+                return
+
+        self.question_enabled = checked
+        self.question_button.setText(
+            "解题功能：开启" if checked else "解题功能：关闭"
+        )
+
+        if self.browser_manager:
+            self.browser_manager.set_question_enabled(checked)
+
+        print(f"解题功能已{'开启' if checked else '关闭'}\n")
 
     @asyncSlot()
     async def start_browser(self):
@@ -78,8 +117,11 @@ class MainWindow(QWidget):
         self.stop_button.setEnabled(True)
         self.status_label.setText("当前状态：正在启动")
 
-        # BrowserManager 使用原来的类
-        self.browser_manager = BrowserManager(url="https://v8.chaoxing.com/")
+        # BrowserManager 添加 question_enabled 参数，True即为开启
+        self.browser_manager = BrowserManager(
+            url="https://v8.chaoxing.com/",
+            question_enabled=self.question_enabled,
+        )
         self.browser_task = asyncio.create_task(self.run_browser())
 
     async def run_browser(self):
