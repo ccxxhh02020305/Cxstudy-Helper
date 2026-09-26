@@ -2,6 +2,7 @@
 “学习不通”  A script that helps college students easily and quickly complete assignments for online courses
 
 目前已实现自动刷PPT以及课程视频。最新加入了解题功能，不过目前非常不稳定，我加入了开启按钮，各位可以自行决定是否开启。
+
 <img width="620" height="183" alt="image" src="https://github.com/user-attachments/assets/50ca4dd6-a47f-47b4-aba9-6f1079e85d4a" />
 
 
